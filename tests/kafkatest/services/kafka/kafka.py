@@ -96,7 +96,7 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
                  client_sasl_mechanism=SecurityConfig.SASL_MECHANISM_GSSAPI, interbroker_sasl_mechanism=SecurityConfig.SASL_MECHANISM_GSSAPI,
                  authorizer_class_name=None, topics=None, version=DEV_BRANCH, jmx_object_names=None,
                  jmx_attributes=None, zk_connect_timeout=5000, zk_session_timeout=6000, server_prop_overides=None, zk_chroot=None,
-                 listener_security_config=ListenerSecurityConfig(), per_node_server_prop_overrides={}, extra_kafka_opts=""):
+                 listener_security_config=ListenerSecurityConfig(), per_node_server_prop_overrides=None, extra_kafka_opts=""):
         """
         :param context: test context
         :param ZookeeperService zk:
@@ -329,7 +329,7 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
         heap_kafka_opts = "-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=%s" % \
                           self.logs["kafka_heap_dump_file"]["path"]
         security_kafka_opts = self.security_config.kafka_opts.strip('\"')
-        cmd += "export KAFKA_OPTS=\"%s %s %s\"; " % (heap_kafka_opts, security_kafka_opts, extra_kafka_opts)
+        cmd += "export KAFKA_OPTS=\"%s %s %s\"; " % (heap_kafka_opts, security_kafka_opts, self.extra_kafka_opts)
         cmd += "%s %s 1>> %s 2>> %s &" % \
                (self.path.script("kafka-server-start.sh", node),
                 KafkaService.CONFIG_FILE,
@@ -337,7 +337,7 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
                 KafkaService.STDOUT_STDERR_CAPTURE)
         return cmd
 
-    def start_node(self, node):
+    def start_node(self, node, timeout_sec=60):
         node.account.mkdirs(KafkaService.PERSISTENT_ROOT)
         prop_file = self.prop_file(node)
         self.logger.info("kafka.properties:")
@@ -353,7 +353,8 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
         with node.account.monitor_log(KafkaService.STDOUT_STDERR_CAPTURE) as monitor:
             node.account.ssh(cmd)
             # Kafka 1.0.0 and higher don't have a space between "Kafka" and "Server"
-            monitor.wait_until("Kafka\s*Server.*started", timeout_sec=60, backoff_sec=.25, err_msg="Kafka server didn't finish startup")
+            monitor.wait_until("Kafka\s*Server.*started", timeout_sec=timeout_sec, backoff_sec=.25,
+                               err_msg="Kafka server didn't finish startup in %d seconds" % timeout_sec)
 
         # Credentials for inter-broker communication are created before starting Kafka.
         # Client credentials are created after starting Kafka so that both loading of
@@ -382,7 +383,7 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
         leader = self.leader(topic, partition)
         self.signal_node(leader, sig)
 
-    def stop_node(self, node, clean_shutdown=True):
+    def stop_node(self, node, clean_shutdown=True, timeout_sec=60):
         pids = self.pids(node)
         sig = signal.SIGTERM if clean_shutdown else signal.SIGKILL
 
@@ -390,7 +391,8 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
             node.account.signal(pid, sig, allow_fail=False)
 
         try:
-            wait_until(lambda: len(self.pids(node)) == 0, timeout_sec=60, err_msg="Kafka node failed to stop")
+            wait_until(lambda: len(self.pids(node)) == 0, timeout_sec=timeout_sec,
+                       err_msg="Kafka node failed to stop in %d seconds" % timeout_sec)
         except Exception:
             self.thread_dump(node)
             raise
@@ -447,10 +449,25 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
         self.logger.info("Running topic creation command...\n%s" % cmd)
         node.account.ssh(cmd)
 
-        time.sleep(1)
-        self.logger.info("Checking to see if topic was properly created...\n%s" % cmd)
-        for line in self.describe_topic(topic_cfg["topic"]).split("\n"):
-            self.logger.info(line)
+    def delete_topic(self, topic, node=None):
+        """
+        Delete a topic with the topics command
+        :param topic:
+        :param node:
+        :return:
+        """
+        if node is None:
+            node = self.nodes[0]
+        self.logger.info("Deleting topic %s" % topic)
+        kafka_topic_script = self.path.script("kafka-topics.sh", node)
+
+        cmd = kafka_topic_script + " "
+        cmd += "--bootstrap-server %(bootstrap_servers)s --delete --topic %(topic)s " % {
+            'bootstrap_servers': self.bootstrap_servers(self.security_protocol),
+            'topic': topic
+        }
+        self.logger.info("Running topic delete command...\n%s" % cmd)
+        node.account.ssh(cmd)
 
     def describe_topic(self, topic, node=None):
         if node is None:
