@@ -33,7 +33,7 @@ import org.apache.kafka.common.{IsolationLevel, TopicPartition}
 import org.junit.Assert._
 import org.junit.Test
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 import scala.collection.Seq
 import scala.util.Random
 
@@ -209,7 +209,7 @@ class FetchRequestTest extends BaseRequestTest {
       Seq(topicPartition))).build()
     val fetchResponse = sendFetchRequest(nonReplicaId, fetchRequest)
     val partitionData = fetchResponse.responseData.get(topicPartition)
-    assertEquals(Errors.REPLICA_NOT_AVAILABLE, partitionData.error)
+    assertEquals(Errors.NOT_LEADER_OR_FOLLOWER, partitionData.error)
   }
 
   @Test
@@ -533,6 +533,12 @@ class FetchRequestTest extends BaseRequestTest {
   }
 
   @Test
+  def testPartitionDataEquals(): Unit = {
+    assertEquals(new FetchRequest.PartitionData(300, 0L, 300, Optional.of(300)),
+    new FetchRequest.PartitionData(300, 0L, 300, Optional.of(300)));
+  }
+
+  @Test
   def testZStdCompressedRecords(): Unit = {
     // Producer compressed topic
     val topicConfig = Map(LogConfig.CompressionTypeProp -> ProducerCompressionCodec.name,
@@ -563,7 +569,8 @@ class FetchRequestTest extends BaseRequestTest {
     // zstd compressed record raises UNSUPPORTED_COMPRESSION_TYPE error.
     val req0 = new FetchRequest.Builder(0, 1, -1, Int.MaxValue, 0,
       createPartitionMap(300, Seq(topicPartition), Map.empty))
-      .setMaxBytes(800).build()
+      .setMaxBytes(800)
+      .build()
 
     val res0 = sendFetchRequest(leaderId, req0)
     val data0 = res0.responseData.get(topicPartition)

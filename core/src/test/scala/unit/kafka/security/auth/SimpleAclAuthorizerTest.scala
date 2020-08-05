@@ -334,7 +334,7 @@ class SimpleAclAuthorizerTest extends ZooKeeperTestHarness {
     val acls1 = Set[Acl](acl2)
     simpleAclAuthorizer.addAcls(acls1, resource1)
 
-    zkClient.deleteAclChangeNotifications
+    zkClient.deleteAclChangeNotifications()
     val authorizer = new SimpleAclAuthorizer
     try {
       authorizer.configure(config.originals)
@@ -701,7 +701,7 @@ class SimpleAclAuthorizerTest extends ZooKeeperTestHarness {
 
   private def getAclChangeEventAsString(patternType: PatternType) = {
     val store = ZkAclStore(patternType)
-    val children = zooKeeperClient.handleRequest(GetChildrenRequest(store.changeStore.aclChangePath))
+    val children = zooKeeperClient.handleRequest(GetChildrenRequest(store.changeStore.aclChangePath, registerWatch = true))
     children.maybeThrow()
     assertEquals("Expecting 1 change event", 1, children.children.size)
 

@@ -20,7 +20,7 @@ package org.apache.kafka.message;
 import java.util.Optional;
 
 public interface FieldType {
-    String STRUCT_PREFIX = "[]";
+    String ARRAY_PREFIX = "[]";
 
     final class BoolFieldType implements FieldType {
         static final BoolFieldType INSTANCE = new BoolFieldType();
@@ -122,6 +122,11 @@ public interface FieldType {
         }
 
         @Override
+        public boolean isFloat() {
+            return true;
+        }
+
+        @Override
         public String toString() {
             return NAME;
         }
@@ -163,6 +168,31 @@ public interface FieldType {
 
         @Override
         public boolean isBytes() {
+            return true;
+        }
+
+        @Override
+        public boolean canBeNullable() {
+            return true;
+        }
+
+        @Override
+        public String toString() {
+            return NAME;
+        }
+    }
+
+    final class RecordsFieldType implements FieldType {
+        static final RecordsFieldType INSTANCE = new RecordsFieldType();
+        private static final String NAME = "records";
+
+        @Override
+        public boolean serializationIsDifferentInFlexibleVersions() {
+            return true;
+        }
+
+        @Override
+        public boolean isRecords() {
             return true;
         }
 
@@ -262,9 +292,11 @@ public interface FieldType {
                 return StringFieldType.INSTANCE;
             case BytesFieldType.NAME:
                 return BytesFieldType.INSTANCE;
+            case RecordsFieldType.NAME:
+                return RecordsFieldType.INSTANCE;
             default:
-                if (string.startsWith(STRUCT_PREFIX)) {
-                    String elementTypeString = string.substring(STRUCT_PREFIX.length());
+                if (string.startsWith(ARRAY_PREFIX)) {
+                    String elementTypeString = string.substring(ARRAY_PREFIX.length());
                     if (elementTypeString.length() == 0) {
                         throw new RuntimeException("Can't parse array type " + string +
                             ".  No element type found.");
@@ -315,6 +347,20 @@ public interface FieldType {
      * Returns true if this is a bytes type.
      */
     default boolean isBytes() {
+        return false;
+    }
+
+    /**
+     * Returns true if this is a records type
+     */
+    default boolean isRecords() {
+        return false;
+    }
+
+    /**
+     * Returns true if this is a floating point type.
+     */
+    default boolean isFloat() {
         return false;
     }
 
