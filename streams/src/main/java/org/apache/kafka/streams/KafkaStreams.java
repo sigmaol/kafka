@@ -25,12 +25,11 @@ import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.metrics.JmxReporter;
-import org.apache.kafka.common.metrics.MetricsContext;
 import org.apache.kafka.common.metrics.KafkaMetricsContext;
 import org.apache.kafka.common.metrics.MetricConfig;
 import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.metrics.MetricsContext;
 import org.apache.kafka.common.metrics.MetricsReporter;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.Sensor.RecordingLevel;
@@ -69,7 +68,6 @@ import org.apache.kafka.streams.state.internals.GlobalStateStoreProvider;
 import org.apache.kafka.streams.state.internals.QueryableStoreProvider;
 import org.apache.kafka.streams.state.internals.RocksDBGenericOptionsToDbOptionsColumnFamilyOptionsAdapter;
 import org.apache.kafka.streams.state.internals.StreamThreadStateStoreProvider;
-import org.apache.kafka.streams.state.internals.metrics.RocksDBMetricsRecordingTrigger;
 import org.slf4j.Logger;
 
 import java.time.Duration;
@@ -147,7 +145,7 @@ public class KafkaStreams implements AutoCloseable {
     private final String clientId;
     private final Metrics metrics;
     private final StreamsConfig config;
-    protected final StreamThread[] threads;
+    protected final List<StreamThread> threads;
     private final StateDirectory stateDirectory;
     private final StreamsMetadataState streamsMetadataState;
     private final ScheduledExecutorService stateDirCleaner;
@@ -155,12 +153,12 @@ public class KafkaStreams implements AutoCloseable {
     private final QueryableStoreProvider queryableStoreProvider;
     private final Admin adminClient;
     private final StreamsMetricsImpl streamsMetrics;
+    private final ProcessorTopology taskTopology;
+    private final ProcessorTopology globalTaskTopology;
 
     GlobalStreamThread globalStreamThread;
     private KafkaStreams.StateListener stateListener;
     private StateRestoreListener globalStateRestoreListener;
-
-    private final RocksDBMetricsRecordingTrigger rocksDBMetricsRecordingTrigger;
 
     // container states
     /**
@@ -661,7 +659,6 @@ public class KafkaStreams implements AutoCloseable {
                          final Time time) throws StreamsException {
         this.config = config;
         this.time = time;
-
         // The application ID is a required config and hence should always have value
         final UUID processId = UUID.randomUUID();
         final String userClientId = config.getString(StreamsConfig.CLIENT_ID_CONFIG);
@@ -688,10 +685,12 @@ public class KafkaStreams implements AutoCloseable {
         final MetricsContext metricsContext = new KafkaMetricsContext(JMX_PREFIX,
                 config.originalsWithPrefix(CommonClientConfigs.METRICS_CONTEXT_PREFIX));
         metrics = new Metrics(metricConfig, reporters, time, metricsContext);
-        streamsMetrics =
-            new StreamsMetricsImpl(metrics, clientId, config.getString(StreamsConfig.BUILT_IN_METRICS_VERSION_CONFIG));
-        rocksDBMetricsRecordingTrigger = new RocksDBMetricsRecordingTrigger(time);
-        streamsMetrics.setRocksDBMetricsRecordingTrigger(rocksDBMetricsRecordingTrigger);
+        streamsMetrics = new StreamsMetricsImpl(
+            metrics,
+            clientId,
+            config.getString(StreamsConfig.BUILT_IN_METRICS_VERSION_CONFIG),
+            time
+        );
         ClientMetrics.addVersionMetric(streamsMetrics);
         ClientMetrics.addCommitIdMetric(streamsMetrics);
         ClientMetrics.addApplicationIdMetric(streamsMetrics, config.getString(StreamsConfig.APPLICATION_ID_CONFIG));
@@ -704,7 +703,7 @@ public class KafkaStreams implements AutoCloseable {
         internalTopologyBuilder.rewriteTopology(config);
 
         // sanity check to fail-fast in case we cannot build a ProcessorTopology due to an exception
-        final ProcessorTopology taskTopology = internalTopologyBuilder.buildTopology();
+        taskTopology = internalTopologyBuilder.buildTopology();
 
         streamsMetadataState = new StreamsMetadataState(
                 internalTopologyBuilder,
@@ -719,9 +718,8 @@ public class KafkaStreams implements AutoCloseable {
         }
 
         // create the stream thread, global update thread, and cleanup thread
-        threads = new StreamThread[numStreamThreads];
-
-        final ProcessorTopology globalTaskTopology = internalTopologyBuilder.buildGlobalStateTopology();
+        threads = Collections.synchronizedList(new LinkedList<>());
+        globalTaskTopology = internalTopologyBuilder.buildGlobalStateTopology();
         final boolean hasGlobalTopology = globalTaskTopology != null;
 
         if (numStreamThreads == 0 && !hasGlobalTopology) {
@@ -735,7 +733,7 @@ public class KafkaStreams implements AutoCloseable {
             totalCacheSize = 0;
             log.warn("Negative cache size passed in. Reverting to cache size of 0 bytes.");
         }
-        final long cacheSizePerThread = totalCacheSize / (threads.length + (hasGlobalTopology ? 1 : 0));
+        final long cacheSizePerThread = totalCacheSize / (numStreamThreads + (hasGlobalTopology ? 1 : 0));
         final boolean hasPersistentStores = taskTopology.hasPersistentLocalStore() ||
                 (hasGlobalTopology && globalTaskTopology.hasPersistentGlobalStore());
 
@@ -766,10 +764,10 @@ public class KafkaStreams implements AutoCloseable {
         // use client id instead of thread client id since this admin client may be shared among threads
         adminClient = clientSupplier.getAdmin(config.getAdminConfigs(ClientUtils.getSharedAdminClientId(clientId)));
 
-        final Map<Long, StreamThread.State> threadState = new HashMap<>(threads.length);
+        final Map<Long, StreamThread.State> threadState = new HashMap<>(numStreamThreads);
         final ArrayList<StreamThreadStateStoreProvider> storeProviders = new ArrayList<>();
-        for (int i = 0; i < threads.length; i++) {
-            threads[i] = StreamThread.create(
+        for (int i = 0; i < numStreamThreads; i++) {
+            final StreamThread streamThread = StreamThread.create(
                 internalTopologyBuilder,
                 config,
                 clientSupplier,
@@ -783,12 +781,13 @@ public class KafkaStreams implements AutoCloseable {
                 stateDirectory,
                 delegatingStateRestoreListener,
                 i + 1);
-            threadState.put(threads[i].getId(), threads[i].state());
-            storeProviders.add(new StreamThreadStateStoreProvider(threads[i], internalTopologyBuilder));
+            threads.add(streamThread);
+            threadState.put(streamThread.getId(), streamThread.state());
+            storeProviders.add(new StreamThreadStateStoreProvider(streamThread));
         }
 
         ClientMetrics.addNumAliveStreamThreadMetric(streamsMetrics, (metricsConfig, now) ->
-            Math.toIntExact(Arrays.stream(threads).filter(thread -> thread.state().isAlive()).count()));
+            Math.toIntExact(threads.stream().filter(thread -> thread.state().isAlive()).count()));
 
         final StreamStateListener streamStateListener = new StreamStateListener(threadState, globalThreadState);
         if (hasGlobalTopology) {
@@ -886,7 +885,7 @@ public class KafkaStreams implements AutoCloseable {
             final long recordingInterval = 1;
             if (rocksDBMetricsRecordingService != null) {
                 rocksDBMetricsRecordingService.scheduleAtFixedRate(
-                    rocksDBMetricsRecordingTrigger,
+                    streamsMetrics.rocksDBMetricsRecordingTrigger(),
                     recordingDelay,
                     recordingInterval,
                     TimeUnit.MINUTES
@@ -1200,10 +1199,21 @@ public class KafkaStreams implements AutoCloseable {
      *
      * @param storeQueryParameters   the parameters used to fetch a queryable store
      * @return A facade wrapping the local {@link StateStore} instances
-     * @throws InvalidStateStoreException if Kafka Streams is (re-)initializing or a store with {@code storeName} and
-     * {@code queryableStoreType} doesn't exist
+     * @throws InvalidStateStoreException If the specified store name does not exist in the topology
+     *                                    or if the Streams instance isn't in a queryable state.
+     *                                    If the store's type does not match the QueryableStoreType,
+     *                                    the Streams instance is not in a queryable state with respect
+     *                                    to the parameters, or if the store is not available locally, then
+     *                                    an InvalidStateStoreException is thrown upon store access.
      */
     public <T> T store(final StoreQueryParameters<T> storeQueryParameters) {
+        final String storeName = storeQueryParameters.storeName();
+        if ((taskTopology == null || !taskTopology.hasStore(storeName))
+            && (globalTaskTopology == null || !globalTaskTopology.hasStore(storeName))) {
+            throw new InvalidStateStoreException(
+                "Cannot get state store " + storeName + " because no such store is registered in the topology."
+            );
+        }
         validateIsRunningOrRebalancing();
         return queryableStoreProvider.getStore(storeQueryParameters);
     }
@@ -1249,11 +1259,7 @@ public class KafkaStreams implements AutoCloseable {
 
         log.debug("Current changelog positions: {}", allChangelogPositions);
         final Map<TopicPartition, ListOffsetsResultInfo> allEndOffsets;
-        try {
-            allEndOffsets = fetchEndOffsets(allPartitions, adminClient);
-        } catch (final TimeoutException e) {
-            throw new StreamsException("Timed out obtaining end offsets from kafka", e);
-        }
+        allEndOffsets = fetchEndOffsets(allPartitions, adminClient);
         log.debug("Current end offsets :{}", allEndOffsets);
 
         for (final Map.Entry<TopicPartition, ListOffsetsResultInfo> entry : allEndOffsets.entrySet()) {

@@ -19,8 +19,11 @@ package org.apache.kafka.streams.kstream.internals;
 import org.apache.kafka.common.serialization.IntegerSerializer;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.test.NoopValueTransformer;
+import org.apache.kafka.test.NoopValueTransformerWithKey;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.TestInputTopic;
 import org.apache.kafka.streams.TopologyTestDriver;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.KStream;
@@ -31,7 +34,6 @@ import org.apache.kafka.streams.kstream.internals.graph.ProcessorParameters;
 import org.apache.kafka.streams.processor.AbstractProcessor;
 import org.apache.kafka.streams.processor.Processor;
 import org.apache.kafka.streams.processor.ProcessorSupplier;
-import org.apache.kafka.streams.TestInputTopic;
 import org.apache.kafka.test.MockProcessorSupplier;
 import org.apache.kafka.test.TestUtils;
 import org.junit.Test;
@@ -50,10 +52,10 @@ public class AbstractStreamTest {
     @Test
     public void testToInternalValueTransformerSupplierSuppliesNewTransformers() {
         final ValueTransformerSupplier<?, ?> valueTransformerSupplier = createMock(ValueTransformerSupplier.class);
-        expect(valueTransformerSupplier.get()).andReturn(null).times(3);
+        expect(valueTransformerSupplier.get()).andAnswer(NoopValueTransformer::new).atLeastOnce();
+        replay(valueTransformerSupplier);
         final ValueTransformerWithKeySupplier<?, ?, ?> valueTransformerWithKeySupplier =
             AbstractStream.toValueTransformerWithKeySupplier(valueTransformerSupplier);
-        replay(valueTransformerSupplier);
         valueTransformerWithKeySupplier.get();
         valueTransformerWithKeySupplier.get();
         valueTransformerWithKeySupplier.get();
@@ -64,7 +66,7 @@ public class AbstractStreamTest {
     public void testToInternalValueTransformerWithKeySupplierSuppliesNewTransformers() {
         final ValueTransformerWithKeySupplier<?, ?, ?> valueTransformerWithKeySupplier =
             createMock(ValueTransformerWithKeySupplier.class);
-        expect(valueTransformerWithKeySupplier.get()).andReturn(null).times(3);
+        expect(valueTransformerWithKeySupplier.get()).andAnswer(NoopValueTransformerWithKey::new).atLeastOnce();
         replay(valueTransformerWithKeySupplier);
         valueTransformerWithKeySupplier.get();
         valueTransformerWithKeySupplier.get();
@@ -85,7 +87,6 @@ public class AbstractStreamTest {
 
         final Properties props = new Properties();
         props.setProperty(StreamsConfig.APPLICATION_ID_CONFIG, "abstract-stream-test");
-        props.setProperty(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9091");
         props.setProperty(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory().getAbsolutePath());
 
         final TopologyTestDriver driver = new TopologyTestDriver(builder.build(), props);
@@ -94,7 +95,7 @@ public class AbstractStreamTest {
             inputTopic.pipeInput(expectedKey, "V" + expectedKey);
         }
 
-        assertTrue(supplier.theCapturedProcessor().processed.size() <= expectedKeys.length);
+        assertTrue(supplier.theCapturedProcessor().processed().size() <= expectedKeys.length);
     }
 
     private static class ExtendedKStream<K, V> extends AbstractStream<K, V> {

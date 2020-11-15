@@ -16,10 +16,12 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
+import java.util.TreeMap;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.errors.StreamsException;
+import org.apache.kafka.streams.errors.TopologyException;
 import org.apache.kafka.streams.kstream.GlobalKTable;
 import org.apache.kafka.streams.kstream.Grouped;
 import org.apache.kafka.streams.kstream.KStream;
@@ -31,7 +33,6 @@ import org.apache.kafka.streams.kstream.internals.graph.StateStoreNode;
 import org.apache.kafka.streams.kstream.internals.graph.StreamSourceNode;
 import org.apache.kafka.streams.kstream.internals.graph.StreamsGraphNode;
 import org.apache.kafka.streams.kstream.internals.graph.TableSourceNode;
-import org.apache.kafka.streams.processor.ProcessorSupplier;
 import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
 import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.state.StoreBuilder;
@@ -128,7 +129,7 @@ public class InternalStreamsBuilder implements InternalNameProvider {
             .orElseGenerateWithPrefix(this, KTableImpl.SOURCE_NAME);
 
         final KTableSource<K, V> tableSource = new KTableSource<>(materialized.storeName(), materialized.queryableStoreName());
-        final ProcessorParameters<K, V> processorParameters = new ProcessorParameters<>(tableSource, tableSourceName);
+        final ProcessorParameters<K, V, ?, ?> processorParameters = new ProcessorParameters<>(tableSource, tableSourceName);
 
         final TableSourceNode<K, V> tableSourceNode = TableSourceNode.<K, V>tableSourceNodeBuilder()
             .withTopic(topic)
@@ -171,7 +172,7 @@ public class InternalStreamsBuilder implements InternalNameProvider {
         final String storeName = materialized.storeName();
         final KTableSource<K, V> tableSource = new KTableSource<>(storeName, storeName);
 
-        final ProcessorParameters<K, V> processorParameters = new ProcessorParameters<>(tableSource, processorName);
+        final ProcessorParameters<K, V, ?, ?> processorParameters = new ProcessorParameters<>(tableSource, processorName);
 
         final TableSourceNode<K, V> tableSourceNode = TableSourceNode.<K, V>tableSourceNodeBuilder()
             .withTopic(topic)
@@ -201,12 +202,12 @@ public class InternalStreamsBuilder implements InternalNameProvider {
         addGraphNode(root, new StateStoreNode<>(builder));
     }
 
-    public synchronized <K, V> void addGlobalStore(final StoreBuilder<?> storeBuilder,
-                                                   final String sourceName,
-                                                   final String topic,
-                                                   final ConsumedInternal<K, V> consumed,
-                                                   final String processorName,
-                                                   final ProcessorSupplier<K, V> stateUpdateSupplier) {
+    public synchronized <KIn, VIn> void addGlobalStore(final StoreBuilder<?> storeBuilder,
+                                                       final String sourceName,
+                                                       final String topic,
+                                                       final ConsumedInternal<KIn, VIn> consumed,
+                                                       final String processorName,
+                                                       final org.apache.kafka.streams.processor.api.ProcessorSupplier<KIn, VIn, Void, Void> stateUpdateSupplier) {
 
         final StreamsGraphNode globalStoreNode = new GlobalStoreNode<>(
             storeBuilder,
@@ -220,10 +221,10 @@ public class InternalStreamsBuilder implements InternalNameProvider {
         addGraphNode(root, globalStoreNode);
     }
 
-    public synchronized <K, V> void addGlobalStore(final StoreBuilder<?> storeBuilder,
-                                                   final String topic,
-                                                   final ConsumedInternal<K, V> consumed,
-                                                   final ProcessorSupplier<K, V> stateUpdateSupplier) {
+    public synchronized <KIn, VIn> void addGlobalStore(final StoreBuilder<?> storeBuilder,
+                                                       final String topic,
+                                                       final ConsumedInternal<KIn, VIn> consumed,
+                                                       final org.apache.kafka.streams.processor.api.ProcessorSupplier<KIn, VIn, Void, Void> stateUpdateSupplier) {
         // explicitly disable logging for global stores
         storeBuilder.withLoggingDisabled();
         final String sourceName = newProcessorName(KStreamImpl.SOURCE_NAME);
@@ -290,6 +291,7 @@ public class InternalStreamsBuilder implements InternalNameProvider {
 
     public void buildAndOptimizeTopology(final Properties props) {
 
+        mergeDuplicateSourceNodes();
         maybePerformOptimizations(props);
 
         final PriorityQueue<StreamsGraphNode> graphNodePriorityQueue = new PriorityQueue<>(5, Comparator.comparing(StreamsGraphNode::buildPriority));
@@ -313,6 +315,50 @@ public class InternalStreamsBuilder implements InternalNameProvider {
             }
         }
         internalTopologyBuilder.validateCopartition();
+    }
+
+    private void mergeDuplicateSourceNodes() {
+        final Map<String, StreamSourceNode<?, ?>> topicsToSourceNodes = new HashMap<>();
+
+        // We don't really care about the order here, but since Pattern does not implement equals() we can't rely on
+        // a regular HashMap and containsKey(Pattern). But for our purposes it's sufficient to compare the compiled
+        // string and flags to determine if two pattern subscriptions can be merged into a single source node
+        final Map<Pattern, StreamSourceNode<?, ?>> patternsToSourceNodes =
+            new TreeMap<>(Comparator.comparing(Pattern::pattern).thenComparing(Pattern::flags));
+
+        for (final StreamsGraphNode graphNode : root.children()) {
+            if (graphNode instanceof StreamSourceNode) {
+                final StreamSourceNode<?, ?> currentSourceNode = (StreamSourceNode<?, ?>) graphNode;
+
+                if (currentSourceNode.topicPattern() != null) {
+                    if (!patternsToSourceNodes.containsKey(currentSourceNode.topicPattern())) {
+                        patternsToSourceNodes.put(currentSourceNode.topicPattern(), currentSourceNode);
+                    } else {
+                        final StreamSourceNode<?, ?> mainSourceNode = patternsToSourceNodes.get(currentSourceNode.topicPattern());
+                        mainSourceNode.merge(currentSourceNode);
+                        root.removeChild(graphNode);
+                    }
+                } else {
+                    for (final String topic : currentSourceNode.topicNames()) {
+                        if (!topicsToSourceNodes.containsKey(topic)) {
+                            topicsToSourceNodes.put(topic, currentSourceNode);
+                        } else {
+                            final StreamSourceNode<?, ?> mainSourceNode = topicsToSourceNodes.get(topic);
+                            // TODO we only merge source nodes if the subscribed topic(s) are an exact match, so it's still not
+                            // possible to subscribe to topicA in one KStream and topicA + topicB in another. We could achieve
+                            // this by splitting these source nodes into one topic per node and routing to the subscribed children
+                            if (!mainSourceNode.topicNames().equals(currentSourceNode.topicNames())) {
+                                LOG.error("Topic {} was found in  subscription for non-equal source nodes {} and {}",
+                                          topic, mainSourceNode, currentSourceNode);
+                                throw new TopologyException("Two source nodes are subscribed to overlapping but not equal input topics");
+                            }
+                            mainSourceNode.merge(currentSourceNode);
+                            root.removeChild(graphNode);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private void maybePerformOptimizations(final Properties props) {
@@ -386,6 +432,11 @@ public class InternalStreamsBuilder implements InternalNameProvider {
                     parentNode.removeChild(repartitionNodeToBeReplaced);
                 }
                 repartitionNodeToBeReplaced.clearChildren();
+
+                // if replaced repartition node is part of any copartition group,
+                // we need to update it with the new node name so that co-partitioning won't break.
+                internalTopologyBuilder.maybeUpdateCopartitionSourceGroups(repartitionNodeToBeReplaced.nodeName(),
+                                                                           optimizedSingleRepartition.nodeName());
 
                 LOG.debug("Updated node {} children {}", optimizedSingleRepartition, optimizedSingleRepartition.children());
             }

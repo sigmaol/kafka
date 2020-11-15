@@ -316,8 +316,13 @@ public class DistributedHerder extends AbstractHerder implements Runnable {
         try {
             // if we failed to read to end of log before, we need to make sure the issue was resolved before joining group
             // Joining and immediately leaving for failure to read configs is exceedingly impolite
-            if (!canReadConfigs && !readConfigToEnd(workerSyncTimeoutMs))
-                return; // Safe to return and tick immediately because readConfigToEnd will do the backoff for us
+            if (!canReadConfigs) {
+                if (readConfigToEnd(workerSyncTimeoutMs)) {
+                    canReadConfigs = true;
+                } else {
+                    return; // Safe to return and tick immediately because readConfigToEnd will do the backoff for us
+                }
+            }
 
             log.debug("Ensuring group membership is still active");
             member.ensureActive();
@@ -746,14 +751,8 @@ public class DistributedHerder extends AbstractHerder implements Runnable {
 
     @Override
     public void connectorConfig(String connName, final Callback<Map<String, String>> callback) {
-        // Subset of connectorInfo, so piggy back on that implementation
         log.trace("Submitting connector config read request {}", connName);
-        connectorInfo(connName, (error, result) -> {
-            if (error != null)
-                callback.onCompletion(error, null);
-            else
-                callback.onCompletion(null, result.config());
-        });
+        super.connectorConfig(connName, callback);
     }
 
     @Override
@@ -1105,7 +1104,9 @@ public class DistributedHerder extends AbstractHerder implements Runnable {
             // we timed out. This should only happen if we failed to read configuration for long enough,
             // in which case giving back control to the main loop will prevent hanging around indefinitely after getting kicked out of the group.
             // We also indicate to the main loop that we failed to readConfigs so it will check that the issue was resolved before trying to join the group
-            if (!readConfigToEnd(workerSyncTimeoutMs)) {
+            if (readConfigToEnd(workerSyncTimeoutMs)) {
+                canReadConfigs = true;
+            } else {
                 canReadConfigs = false;
                 needsRejoin = true;
             }
