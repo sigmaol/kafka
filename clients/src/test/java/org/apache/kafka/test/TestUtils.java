@@ -283,9 +283,11 @@ public class TestUtils {
 
     /**
      * Create a temporary relative directory in the specified parent directory with the given prefix.
-     *
+     * 在指定的父目录中使用给定的前缀创建一个临时相对目录。
      * @param parent The parent folder path name, if null using the default temporary-file directory
+     * @param parent 父文件夹路径名，如果为空，则使用默认的临时文件目录
      * @param prefix The prefix of the temporary directory, if null using "kafka-" as default prefix
+     * @param prefix 临时目录的前缀，如果为空，则使用“kafka-”作为默认前缀
      */
     public static File tempDirectory(final Path parent, String prefix) {
         final File file;

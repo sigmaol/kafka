@@ -421,6 +421,7 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
   private def roundDownToExactMultiple(number: Int, factor: Int) = factor * (number / factor)
 
   private def toRelative(offset: Long): Option[Int] = {
+    //判断消息位移值是否合法，即 largestOffset - baseOffset 的值是不是介于 [0，Int.MAXVALUE] 之间
     val relativeOffset = offset - baseOffset
     if (relativeOffset < 0 || relativeOffset > Int.MaxValue)
       None

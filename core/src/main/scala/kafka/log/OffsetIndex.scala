@@ -160,6 +160,8 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
   override def truncateTo(offset: Long): Unit = {
     inLock(lock) {
       val idx = mmap.duplicate
+
+      //找到最大的下界
       val slot = largestLowerBoundSlotFor(idx, offset, IndexSearchType.KEY)
 
       /* There are 3 cases for choosing the new size

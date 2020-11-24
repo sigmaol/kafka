@@ -123,7 +123,6 @@ public class SchemaProjector {
         return targetStruct;
     }
 
-
     private static void checkMaybeCompatible(Schema source, Schema target) {
         if (source.type() != target.type() && !isPromotable(source.type(), target.type())) {
             throw new SchemaProjectorException("Schema type mismatch. source type: " + source.type() + " and target type: " + target.type());
